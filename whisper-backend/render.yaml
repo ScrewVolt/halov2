@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: whisper-backend
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: python whisper_server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9
