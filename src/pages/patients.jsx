@@ -35,6 +35,10 @@ export default function Patients() {
 
   const user = auth.currentUser
   const exportRef = useRef(null)
+  const recognitionRef = useRef(null)
+  const shouldRestartRef = useRef(false)
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef = useRef([])
 
   useEffect(() => {
     if (!selectedPatient || !user) return
@@ -62,11 +66,8 @@ export default function Patients() {
   }, [selectedPatient, user])
 
   useEffect(() => {
-    if (selectedPatient?.summary) setSummary(selectedPatient.summary)
-    else setSummary("")
-
-    if (selectedPatient?.nursingChart) setNursingChart(selectedPatient.nursingChart)
-    else setNursingChart("")
+    setSummary(selectedPatient?.summary || "")
+    setNursingChart(selectedPatient?.nursingChart || "")
   }, [selectedPatient])
 
   const handleSend = async (text) => {
@@ -94,50 +95,86 @@ export default function Patients() {
     setLiveTranscript("")
   }
 
-  const startWhisperTranscription = async () => {
-    setRecognizing(true)
+  const tagSpeaker = (text) => {
+    const lower = text.toLowerCase()
+    if (lower.startsWith("nurse")) return `Nurse: ${text.replace(/^nurse\s*/i, "")}`
+    if (lower.startsWith("patient")) return `Patient: ${text.replace(/^patient\s*/i, "")}`
+    return `Unspecified: ${text}`
+  }
 
+  const recordingIntervalRef = useRef(null)
+
+  const startRecognition = async () => {
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      alert("🎙️ Your browser does not support audio recording.")
+      return
+    }
+  
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mediaRecorder = new MediaRecorder(stream)
-      const audioChunks = []
-
-      mediaRecorder.ondataavailable = (event) => {
-        audioChunks.push(event.data)
-      }
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' })
-        const formData = new FormData()
-        formData.append("audio", audioBlob, "recording.wav")
-
-        const response = await fetch("http://localhost:5000/transcribe", {
-          method: "POST",
-          body: formData
-        })
-
-        const result = await response.json()
-        if (result.transcript) {
-          handleSend(result.transcript)
-        } else {
-          alert("Failed to transcribe.")
+      mediaRecorderRef.current = mediaRecorder
+      setRecognizing(true)
+      shouldRestartRef.current = true
+  
+      audioChunksRef.current = []
+  
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data)
         }
-
-        setRecognizing(false)
       }
-
+  
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
+        audioChunksRef.current = []
+  
+        const formData = new FormData()
+        formData.append("audio", audioBlob, "chunk.webm")
+  
+        try {
+          const res = await fetch("http://127.0.0.1:5000/transcribe", {
+            method: "POST",
+            body: formData
+          })
+  
+          const data = await res.json()
+          const transcript = data.transcript?.trim()
+          if (transcript) {
+            const tagged = tagSpeaker(transcript)
+            await handleSend(tagged)
+          }
+        } catch (err) {
+          console.error("❌ Transcription error:", err)
+        }
+  
+        if (shouldRestartRef.current) {
+          // Restart recording again after short delay
+          mediaRecorder.start()
+          setTimeout(() => mediaRecorder.stop(), 5000) // Adjust interval as needed
+        }
+      }
+  
+      // Initial record-start cycle
       mediaRecorder.start()
-
-      setTimeout(() => {
-        mediaRecorder.stop()
-      }, 5000) // 5 seconds max
-
+      setTimeout(() => mediaRecorder.stop(), 5000)
     } catch (err) {
-      console.error(err)
-      alert("Microphone access denied or unsupported.")
-      setRecognizing(false)
+      console.error("🎙️ Mic access error:", err)
     }
+  }  
+
+  const stopRecognition = () => {
+    shouldRestartRef.current = false
+    setRecognizing(false)
+  
+    const recorder = mediaRecorderRef.current
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop()
+    }
+    mediaRecorderRef.current = null
+    setLiveTranscript("")
   }
+  
 
   const handleEditStart = (msg) => {
     setEditingMessageId(msg.id)
@@ -166,60 +203,86 @@ export default function Patients() {
   }
 
   const handleGenerateSummary = async () => {
-    if (!messages.length || !user || !selectedPatient) return
-
-    setLoadingSummary(true)
-
-    const chatText = messages.map((m) => m.text).join("\n")
-
-    const prompt = `You are a clinical assistant summarizing a medical interaction between a nurse and a patient.\n\nConversation:\n---\n${chatText}\n---\n\nInstructions:\n1. Identify symptoms, medications, actions taken, and any responses or concerns.\n2. Focus on key medical terms like \"pain\", \"medication\", \"blood pressure\", etc.\n3. Provide a concise and clinically useful **Summary**.\n4. Create a structured **Nursing Chart** using this format:\n\n- Assessment:\n- Diagnosis:\n- Plan:\n- Interventions:\n- Evaluation:`
-
+    if (!messages.length || !user || !selectedPatient) return;
+  
+    setLoadingSummary(true);
+  
+    const chatText = messages.map((m) => m.text).join("\n");
+  
+    const prompt = `
+  You are a clinical assistant summarizing a medical interaction between a nurse and a patient.
+  
+  Conversation:
+  ---
+  ${chatText}
+  ---
+  
+  Instructions:
+  1. Identify symptoms, medications, actions taken, and any responses or concerns.
+  2. Focus on key medical terms like "pain", "medication", "blood pressure", "vomiting", "history", "follow-up", etc.
+  3. Provide a concise and clinically useful **Summary**.
+  4. Create a structured **Nursing Chart** using this format:
+  
+  - Assessment:
+  - Diagnosis:
+  - Plan:
+  - Interventions:
+  - Evaluation:
+  
+  Ensure accuracy and clarity in professional tone.
+  `;
+  
     try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      const response = await fetch("http://127.0.0.1:5000/summary", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-3.5-turbo",
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.3
-        })
-      })
-
-      const data = await response.json()
-      const result = data.choices?.[0]?.message?.content
-
-      if (result) {
-        setSummary(result)
-        setNursingChart(result)
-
-        const patientRef = doc(
-          db,
-          "users",
-          user.uid,
-          "patients",
-          selectedPatient.id
-        )
-
-        await updateDoc(patientRef, {
-          summary: result,
-          nursingChart: result
-        })
-
-        alert("Summary and Nursing Chart saved.")
-      } else {
-        alert("No summary returned.")
+          messages: messages.map((m) => m.text).join("\n"), // 🔁 Use `messages`, not `chat`
+        }),
+      });      
+  
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+  
+      const data = await response.json();
+      const summaryResult = data.summary;
+  
+      if (!summaryResult) {
+        alert("❌ AI did not return a summary.");
+        return;
       }
-    } catch (err) {
-      console.error(err)
-      alert("Failed to generate summary.")
-    } finally {
-      setLoadingSummary(false)
-    }
-  }
+      const summaryMatch = summaryResult.match(/\*\*Summary:\*\*(.*?)\*\*Nursing Chart:\*\*/s)
+      const chartMatch = summaryResult.match(/\*\*Nursing Chart:\*\*(.*)/s)
 
+      const summaryPart = summaryMatch ? summaryMatch[1].trim() : ""
+      const chartPart = chartMatch ? chartMatch[1].trim() : ""
+
+      setSummary(summaryPart)
+      setNursingChart(chartPart)
+  
+      const patientRef = doc(
+        db,
+        "users",
+        user.uid,
+        "patients",
+        selectedPatient.id
+      );
+  
+      await updateDoc(patientRef, {
+        summary: summaryPart,
+        nursingChart: chartPart,
+      });
+  
+      alert("✅ Summary and Nursing Chart saved.");
+    } catch (err) {
+      console.error("❌ Summary generation failed:", err);
+      alert("❌ Summary generation failed.");
+    } finally {
+      setLoadingSummary(false);
+    }
+  };  
+  
   const handleExport = async () => {
     if (!exportRef.current) return
 
@@ -242,6 +305,7 @@ export default function Patients() {
   return (
     <div className="flex flex-col h-full bg-white p-6 rounded shadow">
       <h2 className="text-xl font-bold mb-4">Chatroom</h2>
+
       {!selectedPatient ? (
         <div className="flex-1 text-gray-500 flex items-center justify-center">
           Select a patient from the sidebar to view their chatroom.
@@ -257,9 +321,7 @@ export default function Patients() {
                     value={editingValue}
                     onChange={(e) => setEditingValue(e.target.value)}
                     onBlur={handleEditSave}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleEditSave()
-                    }}
+                    onKeyDown={(e) => e.key === "Enter" && handleEditSave()}
                     className="w-full p-1 border rounded"
                     autoFocus
                   />
@@ -274,9 +336,16 @@ export default function Patients() {
             ))}
             {recognizing && (
               <div className="text-xs text-blue-500 italic mt-1 animate-pulse">
-                🎤 Listening with Whisper...
+                🎤 Listening... (tap Stop to end)
+                {liveTranscript && (
+                  <span
+                    className="block italic text-gray-500"
+                    dangerouslySetInnerHTML={{ __html: highlightKeywords(liveTranscript) }}
+                  />
+                )}
               </div>
             )}
+            <div />
           </div>
 
           <input
@@ -288,20 +357,11 @@ export default function Patients() {
           />
 
           <div className="flex gap-2 mt-2 flex-wrap">
-            <button onClick={() => handleSend()} className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">
-              Send
-            </button>
-            <button onClick={startWhisperTranscription} disabled={recognizing} className="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded">
-              Whisper AI Record
-            </button>
-            <button onClick={handleExport} className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded">
-              Export
-            </button>
-            <button
-              onClick={handleGenerateSummary}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded disabled:opacity-50"
-              disabled={loadingSummary}
-            >
+            <button onClick={() => handleSend()} className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">Send</button>
+            <button onClick={startRecognition} disabled={recognizing} className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">Start Recognition</button>
+            <button onClick={stopRecognition} disabled={!recognizing} className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Stop Recognition</button>
+            <button onClick={handleExport} className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded">Export</button>
+            <button onClick={handleGenerateSummary} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded disabled:opacity-50" disabled={loadingSummary}>
               {loadingSummary ? "Generating..." : "Generate Summary"}
             </button>
           </div>
@@ -311,12 +371,10 @@ export default function Patients() {
             <hr className="my-3 border-gray-300" />
 
             <div className="mb-4">
-              <button
-                onClick={() => setShowTranscript(!showTranscript)}
-                className="text-blue-600 hover:underline font-medium"
-              >
+              <button onClick={() => setShowTranscript(!showTranscript)} className="text-blue-600 hover:underline font-medium">
                 {showTranscript ? "Hide" : "Show"} Chat Transcript
               </button>
+
               {showTranscript && (
                 <>
                   <h3 className="text-lg font-semibold text-gray-800 mt-4 mb-2">Chat Transcript</h3>
@@ -334,12 +392,27 @@ export default function Patients() {
               </>
             )}
 
-            {nursingChart && (
-              <>
-                <h3 className="text-lg font-semibold text-purple-700 mt-4 mb-2">Nursing Chart</h3>
-                <pre className="whitespace-pre-wrap text-gray-800">{nursingChart}</pre>
-              </>
-            )}
+{nursingChart && (
+  <>
+    <h3 className="text-lg font-semibold text-purple-700 mt-4 mb-2">Nursing Chart</h3>
+    <div className="space-y-4">
+      {["Assessment", "Diagnosis", "Plan", "Interventions", "Evaluation"].map((section) => {
+        const regex = new RegExp(`\\*\\*${section}:\\*\\*\\s*(.*?)\\s*(?=\\*\\*|$)`, "s")
+        const match = nursingChart.match(regex)
+        const content = match ? match[1].trim() : null
+
+        return content ? (
+          <div key={section} className="border border-purple-300 rounded-xl p-4 bg-purple-50 shadow-sm">
+            <h4 className="text-md font-semibold text-purple-800 mb-2">{section}</h4>
+            <p className="text-gray-700 whitespace-pre-wrap">{content}</p>
+          </div>
+        ) : null
+      })}
+    </div>
+  </>
+)}
+
+
           </div>
         </>
       )}
