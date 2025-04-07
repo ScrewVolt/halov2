@@ -14,7 +14,7 @@ app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 
 # Load Whisper model once on startup
-model = whisper.load_model("base")
+model = whisper.load_model("tiny")
 
 @app.route("/")
 def home():
