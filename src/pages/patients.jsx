@@ -39,6 +39,7 @@ export default function Patients() {
   const shouldRestartRef = useRef(false)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
+  const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
   useEffect(() => {
     if (!selectedPatient || !user) return
@@ -133,7 +134,7 @@ export default function Patients() {
         formData.append("audio", audioBlob, "chunk.webm")
   
         try {
-          const res = await fetch("http://127.0.0.1:5000/transcribe", {
+          const res = await fetch("${BACKEND}/transcribe", {
             method: "POST",
             body: formData
           })
@@ -233,7 +234,7 @@ export default function Patients() {
   `;
   
     try {
-      const response = await fetch("http://127.0.0.1:5000/summary", {
+      const response = await fetch("${BACKEND}/summary", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
